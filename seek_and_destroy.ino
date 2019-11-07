@@ -1,4 +1,5 @@
 #include<NewPing.h>
+#define BATTLE_DEBUG false
 
 // CONTROLS!!!!!!1!
 #define FORWARD   1
@@ -6,6 +7,7 @@
 #define BRAKEGND 3
 #define MOTOR_LEFT 0
 #define MOTOR_RIGHT 1
+#define STARTBTN 26
 
 // ---------- VNH2SP30 pin definitions ----------
 int inApin[2] = {7, 4};  // INA: Clockwise input
@@ -14,8 +16,9 @@ int pwmpin[2] = {5, 6}; // PWM input
 // ---------- VNH2SP30 pin definitions ----------
 
 // ---------- IR sensors ----------
-#define IR_ANALOG_CALIB 3500 // IR sensor analogRead value when placed in black area
+int IR_ANALOG_CALIB = 3500; // IR sensor analogRead value when placed in black area
 #define IR_SAMPLES_PER_STEP 3 // Number of samples for data averaging. See code.
+#define IR_CALIBRATION_SAMPLES 10
 #define IRFL 0 // IR, Front left
 #define IRFR 1
 #define IRBL 2
@@ -26,10 +29,15 @@ int irAnalogPins[4] = {A8, A9, A11, A10};
 
 bool enemyTargeted = false;
 bool rescueMode = false;
+bool battleTrig = false;
 
 void setup()
 {
-  Serial.begin(250000);
+  if (BATTLE_DEBUG) {
+    Serial.begin(250000);
+  }
+
+  pinMode(STARTBTN, INPUT_PULLUP);
 
   // Initialize digital pins as outputs
   for (int i = 0; i < 2; i++)
@@ -50,49 +58,53 @@ void setup()
     digitalWrite(inBpin[i], LOW);
   }
 
-  pinMode(26, INPUT);
+  // Wait for button press.
+  if (!battleTrig) {
+    awaitStart();
+  }
 
+  // Floor calibration procedure. We're in black, and everything else is white.
+  // LPU #NeverAgain
+  calibrateBlack();
 }
 
-bool initialTrig = true;
 void loop()
 {
-  if (initialTrig) {
-    delay(5000);
-  }
+
   checkSurroundings();
 }
 
 void checkSurroundings() {
-  char data[100];
-
   // Read average, so that we don't consider spurious data (e.g. area that's too shiny)
   // The more reflected, the lesser the value.
-  int averagefLeftWhite = 9999; // Front left, fLeft
-  int averagefRightWhite = 9999;
-  int averagebLeftWhite = 9999;
-  int averagebRightWhite = 9999; // Back right, bRight
+  int aveFL = 9999; // Front left, fLeft
+  int aveFR = 9999;
+  int aveBL = 9999;
+  int aveBR = 9999; // Back right, bRight
 
   for (int i = 0; i < IR_SAMPLES_PER_STEP; i++) {
-    averagefLeftWhite += analogRead(irAnalogPins[IRFL]);
-    averagefRightWhite += analogRead(irAnalogPins[IRFR]);
-    averagebLeftWhite += analogRead(irAnalogPins[IRBL]);
-    averagebRightWhite += analogRead(irAnalogPins[IRBR]);
+    aveFL += analogRead(irAnalogPins[IRFL]);
+    aveFR += analogRead(irAnalogPins[IRFR]);
+    aveBL += analogRead(irAnalogPins[IRBL]);
+    aveBR += analogRead(irAnalogPins[IRBR]);
   }
 
-  averagefLeftWhite = (int) (averagefLeftWhite / IR_SAMPLES_PER_STEP);
-  averagefRightWhite = (int) (averagefRightWhite / IR_SAMPLES_PER_STEP);
-  averagebLeftWhite = (int) (averagebLeftWhite / IR_SAMPLES_PER_STEP);
-  averagebRightWhite = (int) (averagebRightWhite / IR_SAMPLES_PER_STEP);
+  aveFL = (int) (aveFL / IR_SAMPLES_PER_STEP);
+  aveFR = (int) (aveFR / IR_SAMPLES_PER_STEP);
+  aveBL = (int) (aveBL / IR_SAMPLES_PER_STEP);
+  aveBR = (int) (aveBR / IR_SAMPLES_PER_STEP);
 
-  sprintf(data, "FL %d FR %d BL %d BR %d", averagefLeftWhite, averagefRightWhite, averagebLeftWhite, averagebRightWhite);
-  Serial.println(data);
+  if (BATTLE_DEBUG) {
+    char data[100];
+    sprintf(data, "FL %d FR %d BL %d BR %d", aveFL, aveFR, aveBL, aveBR);
+    Serial.println(data);
+  }
 
   // We can compress this part somewhere, but we don't have time
-  bool fLeftWhite = averagefLeftWhite < IR_ANALOG_CALIB;
-  bool fRightWhite = averagefRightWhite < IR_ANALOG_CALIB;
-  bool bLeftWhite = averagebLeftWhite < IR_ANALOG_CALIB;
-  bool bRightWhite = averagebRightWhite < IR_ANALOG_CALIB;
+  bool fLeftWhite = aveFL < IR_ANALOG_CALIB;
+  bool fRightWhite = aveFR < IR_ANALOG_CALIB;
+  bool bLeftWhite = aveBL < IR_ANALOG_CALIB;
+  bool bRightWhite = aveBR < IR_ANALOG_CALIB;
 
   int leftWhSpd = random(127, 255);
   int rightWhSpd = random(127, 255);
@@ -103,8 +115,8 @@ void checkSurroundings() {
     motorGo(MOTOR_LEFT, BACKWARD, leftWhSpd);
     motorGo(MOTOR_RIGHT, BACKWARD, rightWhSpd);
     // Full reverse for X ms
-  } else if (bLeftWhite || bRightWhite || initialTrig) {
-    initialTrig = false;
+  } else if (bLeftWhite || bRightWhite) {
+    rescueMode = true;
     motorGo(MOTOR_LEFT, FORWARD, leftWhSpd);
     motorGo(MOTOR_RIGHT, FORWARD, rightWhSpd);
   }
@@ -145,5 +157,61 @@ void motorGo(uint8_t motor, uint8_t direct, uint8_t pwm)
 
       analogWrite(pwmpin[motor], pwm);
     }
+  }
+}
+
+// Trigger when button is LOW. Else, infinitely loop and lock robot.
+void awaitStart() {
+  while (!battleTrig) {
+    if (!digitalRead(STARTBTN)) {
+      battleTrig = true;
+    }
+  }
+
+  delay(5000);
+}
+
+void calibrateBlack() {
+  // Read average, so that we don't consider spurious data (e.g. area that's too shiny)
+  // The more reflected, the lesser the value.
+  int aveFL = 0; // Front left, FL
+  int aveFR = 0;
+  int aveBL = 0;
+  int aveBR = 0; // Back right, BR
+
+  for (int i = 0; i < IR_CALIBRATION_SAMPLES; i++) {
+    int instantFL = analogRead(irAnalogPins[IRFL]);
+    int instantFR = analogRead(irAnalogPins[IRFR]);
+    int instantBL = analogRead(irAnalogPins[IRBL]);
+    int instantBR = analogRead(irAnalogPins[IRBR]);
+
+    aveFL += instantFL;
+    aveFR += instantFR;
+    aveBL += instantBL;
+    aveBR += instantBR;
+
+    if (BATTLE_DEBUG) {
+      char data[100];
+      sprintf(data, "Read %d: FL %d FR %d BL %d BR %d", i, instantFL, instantFR, instantBL, instantBR);
+      Serial.println(data);
+    }
+  }
+
+  aveFL =  aveFL / IR_CALIBRATION_SAMPLES;
+  aveFR = aveFR / IR_CALIBRATION_SAMPLES;
+  aveBL =  aveBL / IR_CALIBRATION_SAMPLES;
+  aveBR =  aveBR / IR_CALIBRATION_SAMPLES;
+
+  IR_ANALOG_CALIB = (int) ((aveFL + aveFR + aveBL + aveBR) / 4);
+
+  if (BATTLE_DEBUG) {
+    char data[100];
+    sprintf(data, "Average (Samples = %d): aFL %d aFR %d aBL %d aBR %d, totAve %d",
+            IR_CALIBRATION_SAMPLES, aveFL, aveFR, aveBL, aveBR, IR_ANALOG_CALIB);
+    Serial.println(data);
+
+    char data2[100];
+    sprintf("Calibration complete, in-arena average: %d", IR_ANALOG_CALIB);
+    Serial.println(data2);
   }
 }
