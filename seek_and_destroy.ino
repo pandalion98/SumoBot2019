@@ -1,5 +1,7 @@
 #include<NewPing.h>
-#define BATTLE_DEBUG false
+#include <EEPROM.h>
+
+#define BATTLE_DEBUG true // Enables serial outputs
 
 // CONTROLS!!!!!!1!
 #define FORWARD   1
@@ -8,6 +10,8 @@
 #define MOTOR_LEFT 0
 #define MOTOR_RIGHT 1
 #define STARTBTN 26
+#define WHITECALIBBTN 27
+
 
 // ---------- VNH2SP30 pin definitions ----------
 int inApin[2] = {7, 4};  // INA: Clockwise input
@@ -16,7 +20,11 @@ int pwmpin[2] = {5, 6}; // PWM input
 // ---------- VNH2SP30 pin definitions ----------
 
 // ---------- IR sensors ----------
-int IR_ANALOG_CALIB = 3500; // IR sensor analogRead value when placed in black area
+bool whiteCalib = false;
+int IR_BLACK_CALIB = 3500; // IR sensor analogRead value when placed in black area
+int IR_WHITE_CALIB = 3500; // IR sensor analogRead value when placed in black area
+int BORDER_DELTA = 0;
+
 #define IR_SAMPLES_PER_STEP 3 // Number of samples for data averaging. See code.
 #define IR_CALIBRATION_SAMPLES 10
 #define IRFL 0 // IR, Front left
@@ -38,8 +46,9 @@ void setup()
   }
 
   pinMode(STARTBTN, INPUT_PULLUP);
+  pinMode(WHITECALIBBTN, INPUT_PULLUP);
 
-  // Initialize digital pins as outputs
+  // VNH2SP30: Initialize digital pins as outputs
   for (int i = 0; i < 2; i++)
   {
     pinMode(inApin[i], OUTPUT);
@@ -47,18 +56,26 @@ void setup()
     pinMode(pwmpin[i], OUTPUT);
   }
 
-  for (int i = 0; i < 4; i++)
-  {
-    pinMode(irAnalogPins[i], INPUT);
-  }
-  // Initialize braked
+  // VNH2SP30: Initialize braked
   for (int i = 0; i < 2; i++)
   {
     digitalWrite(inApin[i], LOW);
     digitalWrite(inBpin[i], LOW);
   }
 
-  // Wait for button press.
+  // Initialize analog IR pins
+  for (int i = 0; i < 4; i++)
+  {
+    pinMode(irAnalogPins[i], INPUT);
+  }
+
+  // If white calibrate button is held, read and save white value to EEPROM.
+  if (!digitalRead(WHITECALIBBTN)) {
+    whiteCalib = true;
+    calibrateBlack();
+  }
+
+  // Wait for start button press.
   if (!battleTrig) {
     awaitStart();
   }
@@ -70,17 +87,16 @@ void setup()
 
 void loop()
 {
-
   checkSurroundings();
 }
 
 void checkSurroundings() {
   // Read average, so that we don't consider spurious data (e.g. area that's too shiny)
   // The more reflected, the lesser the value.
-  int aveFL = 9999; // Front left, fLeft
-  int aveFR = 9999;
-  int aveBL = 9999;
-  int aveBR = 9999; // Back right, bRight
+  int aveFL = 0; // Front left, fLeft
+  int aveFR = 0;
+  int aveBL = 0;
+  int aveBR = 0; // Back right, bRight
 
   for (int i = 0; i < IR_SAMPLES_PER_STEP; i++) {
     aveFL += analogRead(irAnalogPins[IRFL]);
@@ -89,22 +105,23 @@ void checkSurroundings() {
     aveBR += analogRead(irAnalogPins[IRBR]);
   }
 
-  aveFL = (int) (aveFL / IR_SAMPLES_PER_STEP);
-  aveFR = (int) (aveFR / IR_SAMPLES_PER_STEP);
-  aveBL = (int) (aveBL / IR_SAMPLES_PER_STEP);
-  aveBR = (int) (aveBR / IR_SAMPLES_PER_STEP);
+  aveFL =  aveFL / IR_SAMPLES_PER_STEP;
+  aveFR =  aveFR / IR_SAMPLES_PER_STEP;
+  aveBL =  aveBL / IR_SAMPLES_PER_STEP;
+  aveBR =  aveBR / IR_SAMPLES_PER_STEP;
+
+  // We can compress this part somewhere, but we don't have time
+  bool fLeftWhite = abs(aveFL -  IR_BLACK_CALIB) < BORDER_DELTA ;
+  bool fRightWhite = abs(aveFR - IR_BLACK_CALIB) < BORDER_DELTA;
+  bool bLeftWhite = abs(aveBL - IR_BLACK_CALIB) < BORDER_DELTA;
+  bool bRightWhite = abs(aveBR - IR_BLACK_CALIB) < BORDER_DELTA;
 
   if (BATTLE_DEBUG) {
     char data[100];
-    sprintf(data, "FL %d FR %d BL %d BR %d", aveFL, aveFR, aveBL, aveBR);
+    sprintf(data, "LiveIR FL %d FR %d BL %d BR %d \t inBorder FL:%d FR:%d BL:%d BR:%d",
+            aveFL, aveFR, aveBL, aveBR, fLeftWhite, fRightWhite, bLeftWhite, bRightWhite);
     Serial.println(data);
   }
-
-  // We can compress this part somewhere, but we don't have time
-  bool fLeftWhite = aveFL < IR_ANALOG_CALIB;
-  bool fRightWhite = aveFR < IR_ANALOG_CALIB;
-  bool bLeftWhite = aveBL < IR_ANALOG_CALIB;
-  bool bRightWhite = aveBR < IR_ANALOG_CALIB;
 
   int leftWhSpd = random(127, 255);
   int rightWhSpd = random(127, 255);
@@ -172,6 +189,11 @@ void awaitStart() {
 }
 
 void calibrateBlack() {
+  if (whiteCalib) {
+    // Wait for a bit to make sure the bot is stable (i.e. don't read while operator still handling bot)
+    delay(5000);
+  }
+
   // Read average, so that we don't consider spurious data (e.g. area that's too shiny)
   // The more reflected, the lesser the value.
   int aveFL = 0; // Front left, FL
@@ -202,16 +224,35 @@ void calibrateBlack() {
   aveBL =  aveBL / IR_CALIBRATION_SAMPLES;
   aveBR =  aveBR / IR_CALIBRATION_SAMPLES;
 
-  IR_ANALOG_CALIB = (int) ((aveFL + aveFR + aveBL + aveBR) / 4);
+  int AVERAGE_READ = (int) ((aveFL + aveFR + aveBL + aveBR) / 4);
+
+  // If white calibration, save white value to EEPROM.
+  // Else, consider reading as black, and load white value from EEPROM.
+  if (whiteCalib) {
+    EEPROM.put(0, AVERAGE_READ);
+    whiteCalib = false;
+  } else {
+    IR_BLACK_CALIB = AVERAGE_READ; // We now have a stable black value
+
+    int IR_WHITE_CALIB;
+    EEPROM.get(0, IR_WHITE_CALIB);
+
+    // This is now the delta value between black and white areas.
+    BORDER_DELTA = abs(IR_BLACK_CALIB - IR_WHITE_CALIB);
+  }
 
   if (BATTLE_DEBUG) {
+    if (whiteCalib) {
+      Serial.println("WHITE CALIBRATION")
+    }
+
     char data[100];
     sprintf(data, "Average (Samples = %d): aFL %d aFR %d aBL %d aBR %d, totAve %d",
-            IR_CALIBRATION_SAMPLES, aveFL, aveFR, aveBL, aveBR, IR_ANALOG_CALIB);
+            IR_CALIBRATION_SAMPLES, aveFL, aveFR, aveBL, aveBR, IR_BLACK_CALIB);
     Serial.println(data);
 
     char data2[100];
-    sprintf("Calibration complete, in-arena average: %d", IR_ANALOG_CALIB);
+    sprintf("Calibration complete, in-arena average: %d", IR_BLACK_CALIB);
     Serial.println(data2);
   }
 }
